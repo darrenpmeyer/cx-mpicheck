@@ -2,4 +2,4 @@
 package main
 
 // version is set at build time via -ldflags. Default is "dev".
-var version = "0.2.1-97c3216"
+var version = "0.9.0"

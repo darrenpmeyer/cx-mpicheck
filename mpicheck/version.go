@@ -2,4 +2,4 @@
 package mpicheck
 
 // Version is set at build time via -ldflags. Default is "dev".
-var Version = "0.2.1-97c3216"
+var Version = "0.9.0"
