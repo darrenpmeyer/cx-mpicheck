@@ -71,6 +71,9 @@ func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 	if cfg.BatchSize <= 0 || cfg.BatchSize > 1000 {
 		return result, &Error{Code: errCodeConfig, Err: fmt.Errorf("batch size must be 1-1000")}
 	}
+	if cfg.MPIAPITimeout < 0 {
+		return result, &Error{Code: errCodeConfig, Err: fmt.Errorf("mpiapi timeout must be non-negative (got %s)", cfg.MPIAPITimeout)}
+	}
 	if cfg.ResolveMode == "" {
 		cfg.ResolveMode = ResolveDemand
 	}
@@ -175,7 +178,7 @@ func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 
 	client := cfg.HTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: cfg.MPIAPITimeout}
 	}
 	allResults, err := queryMPIAPI(ctx, client, cfg.APIKey, queries, logf)
 	if err != nil {

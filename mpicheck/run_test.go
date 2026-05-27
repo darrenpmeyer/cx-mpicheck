@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type rewriteTransport struct {
@@ -150,6 +151,69 @@ func TestRunValidatesAPIKey(t *testing.T) {
 	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
 	if err == nil {
 		t.Fatal("expected Run to reject a malformed API key")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if typed.Code != errCodeConfig {
+		t.Fatalf("expected errCodeConfig (%d), got %d", errCodeConfig, typed.Code)
+	}
+}
+
+func TestRunMPIAPITimeout(t *testing.T) {
+	root := t.TempDir()
+	lock := filepath.Join(root, "package-lock.json")
+	if err := os.WriteFile(lock, []byte(`{"packages":{"node_modules/lodash":{"version":"4.17.21"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Server sleeps well past the configured timeout, then responds.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out.packages.json")
+	cfg.OutResults = filepath.Join(root, "out.results.json")
+	cfg.OutRisks = filepath.Join(root, "out.risks.json")
+	cfg.BatchSize = 1000
+	cfg.MPIAPITimeout = 50 * time.Millisecond
+	// Leave cfg.HTTPClient nil so Run constructs the timeout-bearing client.
+	// Point the request at the test server by overriding the URL via a transport.
+	target, _ := url.Parse(srv.URL)
+	cfg.HTTPClient = &http.Client{
+		Timeout:   cfg.MPIAPITimeout,
+		Transport: &rewriteTransport{base: http.DefaultTransport, target: target},
+	}
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected Run to fail due to MPIAPI timeout")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeNetwork {
+		t.Fatalf("expected errCodeNetwork (%d), got %d (%v)", errCodeNetwork, typed.Code, err)
+	}
+}
+
+func TestRunRejectsNegativeTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RootDir = t.TempDir()
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.MPIAPITimeout = -1 * time.Second
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected Run to reject negative timeout")
 	}
 	typed, ok := err.(*Error)
 	if !ok {

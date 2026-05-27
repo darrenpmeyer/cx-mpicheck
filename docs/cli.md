@@ -122,6 +122,12 @@ Flags and environment variables
   - Ignore existing risk report and rescan lockfiles (`true`/`false`).
   - Default: `false`: avoids re-scanning lockfiles that have already been scanned
 
+- `--mpiapi-timeout` / `CX_MPICHECK_MPIAPI_TIMEOUT`
+  - Per-request timeout for MPIAPI HTTP calls, as a Go duration string (e.g. `24s`, `1m30s`, `500ms`).
+  - Default: `24s`. Set to `0` to disable the timeout (not recommended — a hung endpoint will then hang the run indefinitely).
+  - Applied to the default HTTP client. Library callers that supply their own `cfg.HTTPClient` are responsible for setting that client's `Timeout` themselves.
+  - Negative values are rejected with exit code `100`.
+
 - `--batch-size` / `CX_MPICHECK_BATCH_SIZE`
   - MPIAPI batch size (1-1000).
   - Default: `1000`
