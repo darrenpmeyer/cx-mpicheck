@@ -76,6 +76,7 @@ Flags and environment variables
     - `smart` - resolve dependencies live when no lockfile exists OR when `--fake-lockfile` requests it, use existing lockfiles otherwise
     - `always` - ignore any existing lockfiles and always resolve live (slower, more accurate)
   - Default: `demand`
+  - Live resolution invokes external package managers (`npm`, `pnpm`, `pipenv`, `poetry`, `pip-compile`, `go mod tidy`) against project files in the tree. If those files can be attacker-controlled (e.g. PRs in a public-PR pipeline), see [security.md](security.md) for the trust model and recommended postures.
 
 - `--include-mode` / `CX_MPICHECK_INCLUDE_MODE`
   - `only`: use only explicit lockfile paths; don't auto-detect
@@ -102,6 +103,8 @@ Flags and environment variables
 - `--out-risks` / `CX_MPICHECK_OUT_RISKS`
   - Filtered risk output path.
   - Default: `cx.mpiapi-risks.json`
+
+> The `--out-*` flags and `CX_MPICHECK_OUT_*` env vars are not validated for containment under `--root` and can write anywhere the CI user can write. Treat them like `PATH` — never source them from untrusted input. See [security.md](security.md) for the full posture and the owner-only file permissions cx-mpicheck applies to everything it writes.
 
 - `--print-risks` / `CX_MPICHECK_PRINT_RISKS`
   - Print risk output to STDOUT (`true`/`false`).

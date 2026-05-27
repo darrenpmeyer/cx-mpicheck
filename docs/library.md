@@ -117,3 +117,8 @@ Outputs
 Adding new ecosystems
 
 Add a new `LockfileHandler` in `mpicheck.Handlers()` and a parser function that returns a slice of `PackageVersion`. The rest of the pipeline (inventory, MPIAPI batching, risk filtering) works without changes.
+
+See also
+
+- CLI & CI usage: [cli.md](cli.md)
+- Security considerations (trust model, output-path posture, owner-only file permissions): [security.md](security.md)

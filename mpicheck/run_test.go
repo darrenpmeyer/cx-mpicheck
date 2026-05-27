@@ -2,6 +2,7 @@
 package mpicheck
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -159,6 +160,109 @@ func TestRunValidatesAPIKey(t *testing.T) {
 	}
 	if typed.Code != errCodeConfig {
 		t.Fatalf("expected errCodeConfig (%d), got %d", errCodeConfig, typed.Code)
+	}
+}
+
+func TestParseLockfilesRejectsOversize(t *testing.T) {
+	saved := MaxLockfileBytes
+	MaxLockfileBytes = 100
+	defer func() { MaxLockfileBytes = saved }()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var npm LockfileHandler
+	for _, h := range Handlers() {
+		if h.Kind == "npm-package-lock" {
+			npm = h
+			break
+		}
+	}
+	_, err := parseLockfiles(func(string, ...interface{}) {}, []LockfileRef{
+		{Path: path, Kind: npm.Kind, Ecosystem: npm.Ecosystem},
+	})
+	if err == nil {
+		t.Fatal("expected error for oversize lockfile")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeIO {
+		t.Fatalf("expected errCodeIO (%d), got %d", errCodeIO, typed.Code)
+	}
+}
+
+func TestRunPropagatesIOCodeOnOversizeLockfile(t *testing.T) {
+	saved := MaxLockfileBytes
+	MaxLockfileBytes = 100
+	defer func() { MaxLockfileBytes = saved }()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), bytes.Repeat([]byte("x"), 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out.packages.json")
+	cfg.OutResults = filepath.Join(root, "out.results.json")
+	cfg.OutRisks = filepath.Join(root, "out.risks.json")
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected oversize lockfile to fail the run")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeIO {
+		t.Fatalf("expected errCodeIO (%d) propagated from parseLockfiles, got %d", errCodeIO, typed.Code)
+	}
+}
+
+func TestRunRejectsOversizeMPIAPIResponse(t *testing.T) {
+	saved := MaxResponseBytes
+	MaxResponseBytes = 100
+	defer func() { MaxResponseBytes = saved }()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"),
+		[]byte(`{"packages":{"node_modules/lodash":{"version":"4.17.21"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 200))
+	}))
+	defer srv.Close()
+	target, _ := url.Parse(srv.URL)
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out.packages.json")
+	cfg.OutResults = filepath.Join(root, "out.results.json")
+	cfg.OutRisks = filepath.Join(root, "out.risks.json")
+	cfg.BatchSize = 1000
+	cfg.HTTPClient = &http.Client{Transport: &rewriteTransport{base: http.DefaultTransport, target: target}}
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected oversize response body to fail the run")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeNetwork {
+		t.Fatalf("expected errCodeNetwork (%d), got %d", errCodeNetwork, typed.Code)
 	}
 }
 

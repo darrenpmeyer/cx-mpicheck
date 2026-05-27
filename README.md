@@ -17,6 +17,7 @@ Deeper docs
 
 - Library usage: [docs/library.md](docs/library.md)
 - CLI & CI usage: [docs/cli.md](docs/cli.md)
+- Security considerations: [docs/security.md](docs/security.md)
 
 Quick start (CLI)
 

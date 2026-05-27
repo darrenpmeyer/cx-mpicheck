@@ -19,6 +19,43 @@ import (
 
 const mpiAPIURL = "https://api.scs.checkmarx.com/v2/packages"
 
+// Hard byte-count caps for reads cx-mpicheck performs against
+// potentially-attacker-controlled inputs. Exposed as variables (not
+// constants) so tests can override them with small values without
+// having to materialize 500 MB of data on disk or over the wire.
+var (
+	// MaxLockfileBytes caps a single lockfile read. A file larger
+	// than this returns errCodeIO and the run halts before parsing.
+	MaxLockfileBytes int64 = 500 * 1024 * 1024
+
+	// MaxResponseBytes caps a single MPIAPI HTTP response body. A
+	// response larger than this returns errCodeNetwork.
+	MaxResponseBytes int64 = 500 * 1024 * 1024
+)
+
+// readLockfile reads path with a hard size cap. Returns a typed
+// *Error{Code: errCodeIO} when the file exceeds MaxLockfileBytes;
+// other read errors (open, IO) propagate as plain errors and are
+// classified by the caller.
+func readLockfile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, MaxLockfileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxLockfileBytes {
+		return nil, &Error{
+			Code: errCodeIO,
+			Err:  fmt.Errorf("lockfile %s exceeds maximum size of %d bytes", path, MaxLockfileBytes),
+		}
+	}
+	return data, nil
+}
+
 const (
 	errCodeConfig  = 100
 	errCodeScan    = 110
@@ -154,6 +191,12 @@ func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 
 	occurrences, err := parseLockfiles(logf, lockfiles)
 	if err != nil {
+		// readLockfile may return a typed *Error (e.g. errCodeIO for
+		// the size cap); propagate its Code directly rather than
+		// re-labeling it as a parse error.
+		if typed, ok := err.(*Error); ok {
+			return result, typed
+		}
 		return result, &Error{Code: errCodeParse, Err: err}
 	}
 
@@ -231,7 +274,7 @@ func parseLockfiles(logf LogFunc, lockfiles []LockfileRef) ([]PackageOccurrence,
 		if !ok {
 			return nil, fmt.Errorf("missing handler for lockfile kind %s", lf.Kind)
 		}
-		data, err := os.ReadFile(lf.Path)
+		data, err := readLockfile(lf.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -325,10 +368,16 @@ func queryMPIAPI(ctx context.Context, client *http.Client, apiKey string, batche
 		if err != nil {
 			return nil, &Error{Code: errCodeNetwork, Err: err}
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 		resp.Body.Close()
 		if err != nil {
 			return nil, &Error{Code: errCodeNetwork, Err: err}
+		}
+		if int64(len(body)) > MaxResponseBytes {
+			return nil, &Error{
+				Code: errCodeNetwork,
+				Err:  fmt.Errorf("MPIAPI response exceeds maximum size of %d bytes", MaxResponseBytes),
+			}
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, &Error{Code: errCodeNetwork, Err: fmt.Errorf("MPIAPI returned %d: %s", resp.StatusCode, Redact(strings.TrimSpace(string(body)), apiKey))}
