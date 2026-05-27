@@ -70,16 +70,26 @@ Flags and environment variables
   - Default: `false`
 
 - `--resolve` / `CX_MPICHECK_RESOLVE`
-  - Controls fake lockfile generation and lockfile usage: `never`, `demand`, `smart`, `always`.
+  - Controls when to use local package manager tools to resolve package dependencies. Only creates fake temporary lockfiles, does not overwrite existing real ones 
+    - `never` - only trust lockfiles, never resolve dependencies live
+    - `demand` - trust lockfiles, resolve dependencies only when explicitly asked to via `--fake-lockfile`
+    - `smart` - resolve dependencies live when no lockfile exists OR when `--fake-lockfile` requests it, use existing lockfiles otherwise
+    - `always` - ignore any existing lockfiles and always resolve live (slower, more accurate)
   - Default: `demand`
 
 - `--include-mode` / `CX_MPICHECK_INCLUDE_MODE`
-  - `only`: use only explicit lockfile paths.
-  - `also`: use explicit paths plus discovery under `--root`.
+  - `only`: use only explicit lockfile paths; don't auto-detect
+  - `also`: use explicit paths plus discover additional project and lockfiles under `--root`.
   - Default: `also`
 
 - `--exclude` / `CX_MPICHECK_EXCLUDE`
-  - Paths to exclude (file or directory). Repeatable or list format.
+  - Paths to omit from lockfile processing. Each entry is a file or directory.
+  - Repeatable, and each value may itself be a list separated by `,` or `;`. Surrounding whitespace is trimmed and empty entries are dropped.
+  - Relative paths are resolved against `--root`; absolute paths are used as-is.
+  - If an entry resolves to an existing directory, every lockfile beneath it is skipped and the directory is pruned from the discovery walk (efficient — the tree below is never read). If the entry resolves to a file (or does not exist on disk as a directory), only that exact path is skipped.
+  - Exclusions apply both to lockfiles found by discovery and to lockfiles supplied explicitly via `--lockfile` — an excluded path won't reappear just because it was named on the command line.
+  - Symlinks are not honored for exclusion: a symlink named `vendor` pointing into the tree will not suppress its target. If you need to skip both, list both, or remove the link.
+  - Example: `--exclude vendor,third_party --exclude test/fixtures/legacy.lock`
 
 - `--out-packages` / `CX_MPICHECK_OUT_PACKAGES`
   - Package inventory output path.
