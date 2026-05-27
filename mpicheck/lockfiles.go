@@ -162,6 +162,18 @@ func DiscoverLockfiles(root string, explicit []string, mode IncludeMode, exclude
 		if isExcluded(path, excludeAbs) {
 			return nil
 		}
+		if isFakeLockfileArtifact(path) {
+			// Skip cx-mpicheck-generated fake lockfiles during the
+			// recursive walk. The handler Match functions still claim
+			// them (so they remain valid as explicit --lockfile/
+			// --fake-lockfile inputs and as auto-added generation
+			// outputs), but a stale artifact from a prior run must
+			// not be merged with a real lockfile in the same
+			// directory — that would double-count packages whose
+			// resolved versions diverged between the real and the
+			// regenerated lockfiles.
+			return nil
+		}
 		for _, h := range handlers {
 			if h.Match(path) {
 				lockfiles[path] = LockfileRef{Path: path, Kind: h.Kind, Ecosystem: h.Ecosystem}
@@ -203,6 +215,19 @@ func resolvePaths(root string, paths []string) ([]string, error) {
 		resolved = append(resolved, resolveSymlinks(abs))
 	}
 	return resolved, nil
+}
+
+// isFakeLockfileArtifact reports whether path looks like a
+// cx-mpicheck-generated fake lockfile (e.g. cx.npm.mpicheck.lock,
+// cx.pip.mpicheck.lock). These files are tool output, not user-
+// authored lockfiles. They remain valid as explicit --lockfile or
+// --fake-lockfile inputs (the handler Match functions still claim
+// the names), but the recursive walk skips them so a stale artifact
+// from a prior run cannot be merged with a real lockfile in the
+// same directory.
+func isFakeLockfileArtifact(path string) bool {
+	base := filepath.Base(path)
+	return strings.HasPrefix(base, "cx.") && strings.HasSuffix(base, ".mpicheck.lock")
 }
 
 // resolveSymlinks returns the canonical path with symlinks resolved.

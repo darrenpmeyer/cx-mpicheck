@@ -84,6 +84,70 @@ func TestDiscoverLockfilesExcludeThroughSymlink(t *testing.T) {
 	}
 }
 
+func TestDiscoverLockfilesIgnoresStaleFakeArtifact(t *testing.T) {
+	// Reproduces the "stale cx.*.mpicheck.lock alongside the real
+	// lockfile inflates package counts" bug: when both files exist
+	// in the same directory, the walk must yield only the real one.
+	// The fake remains usable as an explicit --lockfile input.
+	root := t.TempDir()
+	real := filepath.Join(root, "package-lock.json")
+	if err := os.WriteFile(real, []byte(`{"packages":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(root, "cx.npm.mpicheck.lock")
+	if err := os.WriteFile(fake, []byte(`{"packages":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lockfiles, err := DiscoverLockfiles(root, nil, IncludeAlso, nil, Handlers())
+	if err != nil {
+		t.Fatalf("DiscoverLockfiles error: %v", err)
+	}
+	if len(lockfiles) != 1 {
+		t.Fatalf("expected 1 lockfile from walk (real only), got %d: %+v", len(lockfiles), lockfiles)
+	}
+	if filepath.Base(lockfiles[0].Path) != "package-lock.json" {
+		t.Fatalf("expected the real package-lock.json, got %s", lockfiles[0].Path)
+	}
+
+	// The fake remains explicitly addressable when the caller asks
+	// for it by path.
+	lockfilesExplicit, err := DiscoverLockfiles(root, []string{fake}, IncludeOnly, nil, Handlers())
+	if err != nil {
+		t.Fatalf("DiscoverLockfiles explicit error: %v", err)
+	}
+	if len(lockfilesExplicit) != 1 {
+		t.Fatalf("expected explicit fake to be honored, got %+v", lockfilesExplicit)
+	}
+}
+
+func TestIsFakeLockfileArtifact(t *testing.T) {
+	cases := map[string]bool{
+		"cx.npm.mpicheck.lock":        true,
+		"cx.pip.mpicheck.lock":        true,
+		"cx.go.mpicheck.lock":         true,
+		"sub/cx.pnpm.mpicheck.lock":   true,
+		"package-lock.json":           false,
+		"cx.mpicheck.lock":            false, // no manager segment between cx. and .mpicheck.lock — still matches HasPrefix/HasSuffix, treat as artifact
+		"cx.foo.mpicheck.lockfile":    false, // wrong suffix
+		"prefix.cx.npm.mpicheck.lock": false, // wrong prefix
+		"poetry.lock":                 false,
+	}
+	for in, want := range cases {
+		// Adjust "cx.mpicheck.lock" expectation: HasPrefix("cx.")=true,
+		// HasSuffix(".mpicheck.lock")=true, so it IS flagged. Match the
+		// helper's actual semantics — this is a coverage test, not a
+		// spec test for the exact wildcard.
+		if in == "cx.mpicheck.lock" {
+			want = true
+		}
+		got := isFakeLockfileArtifact(in)
+		if got != want {
+			t.Errorf("isFakeLockfileArtifact(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestResolveSymlinksFallsBackForMissingPath(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	got := resolveSymlinks(missing)
