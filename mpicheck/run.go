@@ -88,6 +88,11 @@ func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 	if err != nil {
 		return result, &Error{Code: errCodeConfig, Err: err}
 	}
+	// Canonicalize root so relative-path computations against lockfile
+	// paths (which discovery also canonicalizes) line up. On macOS this
+	// matters even without explicit symlinks because /var is a symlink
+	// to /private/var.
+	rootAbs = resolveSymlinks(rootAbs)
 
 	if cfg.ResolveMode == ResolveNever && len(cfg.FakeLockfiles) > 0 {
 		logf("Resolve mode 'never' set; ignoring fake lockfile generation inputs")
