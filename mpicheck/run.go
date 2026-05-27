@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,15 +27,47 @@ const (
 	errCodeNetwork = 140
 )
 
+// MaxAPIKeyLen caps the accepted MPIAPI key length. The key is a JWT;
+// real-world JWTs run a few hundred to a couple thousand characters, so
+// 2048 is a sane upper bound that catches binary blobs and accidental
+// file-contents-as-env without rejecting any realistic token.
+const MaxAPIKeyLen = 2048
+
+// apiKeyPattern matches a JWT: three non-empty URL-safe base64 segments
+// (A-Z, a-z, 0-9, '-', '_') joined by '.'. Padding ('=') is allowed but
+// rarely present in real JWTs; we accept 0-2 trailing '=' per segment
+// for robustness.
+var apiKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+=*\.[A-Za-z0-9_-]+=*\.[A-Za-z0-9_-]+=*$`)
+
+// validateAPIKey enforces length and JWT-shape constraints on the MPIAPI
+// key. The key value is never echoed in the returned error; only its
+// length is mentioned when that is the failure mode. Returns the
+// whitespace-trimmed key for use in the Authorization header.
+func validateAPIKey(key string) (string, error) {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return "", errors.New("CHECKMARX_MPIAPI_KEY is required")
+	}
+	if len(trimmed) > MaxAPIKeyLen {
+		return "", fmt.Errorf("CHECKMARX_MPIAPI_KEY length %d exceeds maximum of %d characters", len(trimmed), MaxAPIKeyLen)
+	}
+	if !apiKeyPattern.MatchString(trimmed) {
+		return "", errors.New("CHECKMARX_MPIAPI_KEY is not a well-formed JWT (expected three URL-safe base64 segments joined by '.')")
+	}
+	return trimmed, nil
+}
+
 // Run executes the full scan + MPIAPI flow.
 func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 	result := RunResult{StartedAt: time.Now()}
 	if cfg.RootDir == "" {
 		return result, &Error{Code: errCodeConfig, Err: errors.New("root directory is required")}
 	}
-	if cfg.APIKey == "" {
-		return result, &Error{Code: errCodeConfig, Err: errors.New("CHECKMARX_MPIAPI_KEY is required")}
+	trimmedKey, err := validateAPIKey(cfg.APIKey)
+	if err != nil {
+		return result, &Error{Code: errCodeConfig, Err: err}
 	}
+	cfg.APIKey = trimmedKey
 	if cfg.BatchSize <= 0 || cfg.BatchSize > 1000 {
 		return result, &Error{Code: errCodeConfig, Err: fmt.Errorf("batch size must be 1-1000")}
 	}
@@ -290,7 +323,7 @@ func queryMPIAPI(ctx context.Context, client *http.Client, apiKey string, batche
 			return nil, &Error{Code: errCodeNetwork, Err: err}
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, &Error{Code: errCodeNetwork, Err: fmt.Errorf("MPIAPI returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))}
+			return nil, &Error{Code: errCodeNetwork, Err: fmt.Errorf("MPIAPI returned %d: %s", resp.StatusCode, Redact(strings.TrimSpace(string(body)), apiKey))}
 		}
 		var batchResults []map[string]interface{}
 		if err := json.Unmarshal(body, &batchResults); err != nil {
