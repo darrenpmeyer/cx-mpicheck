@@ -7,15 +7,22 @@ on:
         description: "Tag to release (e.g., v1.2.3)"
         required: true
         type: string
-      release_token:
-        description: "PAT with repo permissions to create releases"
-        required: true
-        type: string
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
     steps:
+      - name: Validate tag format
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "Tag '$TAG' does not match required format vMAJOR.MINOR.PATCH[-PRERELEASE]" >&2
+            exit 1
+          fi
+
       - name: Checkout tag
         uses: actions/checkout@v4
         with:
@@ -24,8 +31,8 @@ jobs:
       - name: Verify tag exists
         run: |
           git fetch --tags --force
-          if ! git rev-parse --verify --quiet "refs/tags/${{ inputs.tag }}"; then
-            echo "Tag '${{ inputs.tag }}' does not exist" >&2
+          if ! git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            echo "Tag '$TAG' does not exist" >&2
             exit 1
           fi
 
@@ -39,10 +46,6 @@ jobs:
 
       - name: Create GitHub release
         env:
-          GH_TOKEN: ${{ inputs.release_token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "release_token input is required" >&2
-            exit 1
-          fi
-          gh release create "${{ inputs.tag }}" bin/* --title "${{ inputs.tag }}" --notes "Release ${{ inputs.tag }}"
+          gh release create "$TAG" bin/* --title "$TAG" --notes "Release $TAG"
