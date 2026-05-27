@@ -91,11 +91,18 @@ func Handlers() []LockfileHandler {
 }
 
 // DiscoverLockfiles finds lockfiles under root and merges explicit paths.
+//
+// All paths (root, explicit lockfile paths, excludes) are canonicalized
+// via filepath.EvalSymlinks where possible, so an --exclude entry that
+// points at a symlink correctly suppresses the symlink's target during
+// the walk. WalkDir itself still does not follow symlinks, so an
+// in-tree symlink does not cause the walk to leave the resolved root.
 func DiscoverLockfiles(root string, explicit []string, mode IncludeMode, exclude []string, handlers []LockfileHandler) ([]LockfileRef, error) {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
+	rootAbs = resolveSymlinks(rootAbs)
 
 	explicitAbs, err := resolvePaths(rootAbs, explicit)
 	if err != nil {
@@ -114,6 +121,7 @@ func DiscoverLockfiles(root string, explicit []string, mode IncludeMode, exclude
 		if err != nil {
 			return err
 		}
+		pathAbs = resolveSymlinks(pathAbs)
 		if isExcluded(pathAbs, excludeAbs) {
 			return nil
 		}
@@ -154,6 +162,18 @@ func DiscoverLockfiles(root string, explicit []string, mode IncludeMode, exclude
 		if isExcluded(path, excludeAbs) {
 			return nil
 		}
+		if isFakeLockfileArtifact(path) {
+			// Skip cx-mpicheck-generated fake lockfiles during the
+			// recursive walk. The handler Match functions still claim
+			// them (so they remain valid as explicit --lockfile/
+			// --fake-lockfile inputs and as auto-added generation
+			// outputs), but a stale artifact from a prior run must
+			// not be merged with a real lockfile in the same
+			// directory — that would double-count packages whose
+			// resolved versions diverged between the real and the
+			// regenerated lockfiles.
+			return nil
+		}
 		for _, h := range handlers {
 			if h.Match(path) {
 				lockfiles[path] = LockfileRef{Path: path, Kind: h.Kind, Ecosystem: h.Ecosystem}
@@ -192,9 +212,36 @@ func resolvePaths(root string, paths []string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		resolved = append(resolved, abs)
+		resolved = append(resolved, resolveSymlinks(abs))
 	}
 	return resolved, nil
+}
+
+// isFakeLockfileArtifact reports whether path looks like a
+// cx-mpicheck-generated fake lockfile (e.g. cx.npm.mpicheck.lock,
+// cx.pip.mpicheck.lock). These files are tool output, not user-
+// authored lockfiles. They remain valid as explicit --lockfile or
+// --fake-lockfile inputs (the handler Match functions still claim
+// the names), but the recursive walk skips them so a stale artifact
+// from a prior run cannot be merged with a real lockfile in the
+// same directory.
+func isFakeLockfileArtifact(path string) bool {
+	base := filepath.Base(path)
+	return strings.HasPrefix(base, "cx.") && strings.HasSuffix(base, ".mpicheck.lock")
+}
+
+// resolveSymlinks returns the canonical path with symlinks resolved.
+// If resolution fails — most commonly because the path doesn't exist
+// on disk — the input is returned unchanged. This lets callers pass
+// speculative paths (e.g. an --exclude entry that may not exist in
+// the tree) without aborting the whole discovery, while still letting
+// real symlinks be matched against walk results.
+func resolveSymlinks(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
 }
 
 func isExcluded(path string, excludes []string) bool {

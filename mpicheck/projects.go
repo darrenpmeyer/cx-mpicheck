@@ -7,11 +7,16 @@ import (
 )
 
 // DiscoverProjectFiles finds supported project definition files under root.
+//
+// Root and excludes are canonicalized via filepath.EvalSymlinks so an
+// --exclude entry pointing at a symlink correctly suppresses the
+// symlink's target during the walk. See DiscoverLockfiles for details.
 func DiscoverProjectFiles(root string, exclude []string) ([]string, error) {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
+	rootAbs = resolveSymlinks(rootAbs)
 	excludeAbs, err := resolvePaths(rootAbs, exclude)
 	if err != nil {
 		return nil, err

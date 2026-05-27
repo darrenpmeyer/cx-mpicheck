@@ -2,6 +2,7 @@
 package mpicheck
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -9,7 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 type rewriteTransport struct {
@@ -59,7 +63,7 @@ func TestRunWithMockMPIAPI(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.RootDir = root
-	cfg.APIKey = "test-key"
+	cfg.APIKey = "aaaa.bbbb.cccc"
 	cfg.OutPackages = filepath.Join(root, "out.packages.json")
 	cfg.OutResults = filepath.Join(root, "out.results.json")
 	cfg.OutRisks = filepath.Join(root, "out.risks.json")
@@ -84,6 +88,295 @@ func TestRunWithMockMPIAPI(t *testing.T) {
 	}
 	if len(risks[0].Lockfiles) != 1 || risks[0].Lockfiles[0] != "package-lock.json" {
 		t.Fatalf("expected relative lockfile path, got %v", risks[0].Lockfiles)
+	}
+}
+
+func TestValidateAPIKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty", input: "", wantErr: true},
+		{name: "whitespace only", input: "   \n\t  ", wantErr: true},
+		{name: "well-formed JWT", input: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature123", want: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature123"},
+		{name: "JWT with hyphens and underscores", input: "abc-def_ghi.payload.sig-123_xyz", want: "abc-def_ghi.payload.sig-123_xyz"},
+		{name: "JWT with surrounding whitespace gets trimmed", input: "  aaa.bbb.ccc\n", want: "aaa.bbb.ccc"},
+		{name: "JWT with trailing padding", input: "aaa==.bbb=.ccc", want: "aaa==.bbb=.ccc"},
+		{name: "two segments fails", input: "aaa.bbb", wantErr: true},
+		{name: "four segments fails", input: "aaa.bbb.ccc.ddd", wantErr: true},
+		{name: "empty segment fails", input: "aaa..ccc", wantErr: true},
+		{name: "spaces inside fail", input: "aaa.bb b.ccc", wantErr: true},
+		{name: "non-base64 chars fail", input: "aaa.bbb!.ccc", wantErr: true},
+		{name: "standard-base64 '+' rejected (JWT is URL-safe)", input: "aa+a.bbb.ccc", wantErr: true},
+		{name: "standard-base64 '/' rejected (JWT is URL-safe)", input: "aaa.b/bb.ccc", wantErr: true},
+		{name: "newline inside fails", input: "aaa.bbb\n.ccc", wantErr: true},
+		{name: "too long", input: strings.Repeat("a", 2045) + ".b.c", wantErr: true},
+		{name: "right at limit", input: strings.Repeat("a", 2044) + ".b.c", want: strings.Repeat("a", 2044) + ".b.c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := validateAPIKey(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (got=%q)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateAPIKeyErrorDoesNotEchoKey(t *testing.T) {
+	sentinel := "SUPERSECRETKEYDONOTLEAK"
+	_, err := validateAPIKey(sentinel + "!!!") // invalid char triggers format error
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("error message echoed the key value: %q", err.Error())
+	}
+}
+
+func TestRunValidatesAPIKey(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RootDir = t.TempDir()
+	cfg.APIKey = "not-a-jwt"
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected Run to reject a malformed API key")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if typed.Code != errCodeConfig {
+		t.Fatalf("expected errCodeConfig (%d), got %d", errCodeConfig, typed.Code)
+	}
+}
+
+func TestParseLockfilesRejectsOversize(t *testing.T) {
+	saved := MaxLockfileBytes
+	MaxLockfileBytes = 100
+	defer func() { MaxLockfileBytes = saved }()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package-lock.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var npm LockfileHandler
+	for _, h := range Handlers() {
+		if h.Kind == "npm-package-lock" {
+			npm = h
+			break
+		}
+	}
+	_, err := parseLockfiles(func(string, ...interface{}) {}, []LockfileRef{
+		{Path: path, Kind: npm.Kind, Ecosystem: npm.Ecosystem},
+	})
+	if err == nil {
+		t.Fatal("expected error for oversize lockfile")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeIO {
+		t.Fatalf("expected errCodeIO (%d), got %d", errCodeIO, typed.Code)
+	}
+}
+
+func TestRunPropagatesIOCodeOnOversizeLockfile(t *testing.T) {
+	saved := MaxLockfileBytes
+	MaxLockfileBytes = 100
+	defer func() { MaxLockfileBytes = saved }()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), bytes.Repeat([]byte("x"), 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out.packages.json")
+	cfg.OutResults = filepath.Join(root, "out.results.json")
+	cfg.OutRisks = filepath.Join(root, "out.risks.json")
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected oversize lockfile to fail the run")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeIO {
+		t.Fatalf("expected errCodeIO (%d) propagated from parseLockfiles, got %d", errCodeIO, typed.Code)
+	}
+}
+
+func TestRunRejectsOversizeMPIAPIResponse(t *testing.T) {
+	saved := MaxResponseBytes
+	MaxResponseBytes = 100
+	defer func() { MaxResponseBytes = saved }()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"),
+		[]byte(`{"packages":{"node_modules/lodash":{"version":"4.17.21"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 200))
+	}))
+	defer srv.Close()
+	target, _ := url.Parse(srv.URL)
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out.packages.json")
+	cfg.OutResults = filepath.Join(root, "out.results.json")
+	cfg.OutRisks = filepath.Join(root, "out.risks.json")
+	cfg.BatchSize = 1000
+	cfg.HTTPClient = &http.Client{Transport: &rewriteTransport{base: http.DefaultTransport, target: target}}
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected oversize response body to fail the run")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeNetwork {
+		t.Fatalf("expected errCodeNetwork (%d), got %d", errCodeNetwork, typed.Code)
+	}
+}
+
+func TestRunOutputFilesAreOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not enforced on Windows in the way 0o600 implies; this assertion is POSIX-only")
+	}
+
+	root := t.TempDir()
+	lock := filepath.Join(root, "package-lock.json")
+	if err := os.WriteFile(lock, []byte(`{"packages":{"node_modules/lodash":{"version":"4.17.21"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	target, _ := url.Parse(srv.URL)
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out", "packages.json")
+	cfg.OutResults = filepath.Join(root, "out", "results.json")
+	cfg.OutRisks = filepath.Join(root, "out", "risks.json")
+	cfg.BatchSize = 1000
+	cfg.HTTPClient = &http.Client{Transport: &rewriteTransport{base: http.DefaultTransport, target: target}}
+
+	if _, err := Run(context.Background(), cfg, func(string, ...interface{}) {}); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	for _, p := range []string{cfg.OutPackages, cfg.OutResults, cfg.OutRisks} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if got := info.Mode().Perm(); got != OwnerFileMode {
+			t.Errorf("%s: mode %o, want %o", p, got, OwnerFileMode)
+		}
+	}
+
+	// Parent dir created by writeJSON should also be owner-only.
+	dirInfo, err := os.Stat(filepath.Join(root, "out"))
+	if err != nil {
+		t.Fatalf("stat out dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != OwnerDirMode {
+		t.Errorf("out dir: mode %o, want %o", got, OwnerDirMode)
+	}
+}
+
+func TestRunMPIAPITimeout(t *testing.T) {
+	root := t.TempDir()
+	lock := filepath.Join(root, "package-lock.json")
+	if err := os.WriteFile(lock, []byte(`{"packages":{"node_modules/lodash":{"version":"4.17.21"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Server sleeps well past the configured timeout, then responds.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out.packages.json")
+	cfg.OutResults = filepath.Join(root, "out.results.json")
+	cfg.OutRisks = filepath.Join(root, "out.risks.json")
+	cfg.BatchSize = 1000
+	cfg.MPIAPITimeout = 50 * time.Millisecond
+	// Leave cfg.HTTPClient nil so Run constructs the timeout-bearing client.
+	// Point the request at the test server by overriding the URL via a transport.
+	target, _ := url.Parse(srv.URL)
+	cfg.HTTPClient = &http.Client{
+		Timeout:   cfg.MPIAPITimeout,
+		Transport: &rewriteTransport{base: http.DefaultTransport, target: target},
+	}
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected Run to fail due to MPIAPI timeout")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if typed.Code != errCodeNetwork {
+		t.Fatalf("expected errCodeNetwork (%d), got %d (%v)", errCodeNetwork, typed.Code, err)
+	}
+}
+
+func TestRunRejectsNegativeTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RootDir = t.TempDir()
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.MPIAPITimeout = -1 * time.Second
+
+	_, err := Run(context.Background(), cfg, func(string, ...interface{}) {})
+	if err == nil {
+		t.Fatal("expected Run to reject negative timeout")
+	}
+	typed, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if typed.Code != errCodeConfig {
+		t.Fatalf("expected errCodeConfig (%d), got %d", errCodeConfig, typed.Code)
 	}
 }
 

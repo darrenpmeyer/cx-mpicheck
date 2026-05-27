@@ -104,6 +104,7 @@ func main() {
 	fakeLockfileOutEnv := os.Getenv("CX_MPICHECK_FAKE_LOCKFILE_OUT")
 	fakeLockfileCleanupEnv := os.Getenv("CX_MPICHECK_FAKE_LOCKFILE_CLEANUP")
 	resolveEnv := os.Getenv("CX_MPICHECK_RESOLVE")
+	mpiapiTimeoutEnv := os.Getenv("CX_MPICHECK_MPIAPI_TIMEOUT")
 	batchSizeEnv := os.Getenv("CX_MPICHECK_BATCH_SIZE")
 	verboseEnv := os.Getenv("CX_MPICHECK_VERBOSE")
 
@@ -141,6 +142,14 @@ func main() {
 	}
 	if resolveEnv != "" {
 		cfg.ResolveMode = mpicheck.ResolveMode(strings.ToLower(resolveEnv))
+	}
+	if mpiapiTimeoutEnv != "" {
+		d, err := time.ParseDuration(mpiapiTimeoutEnv)
+		if err != nil {
+			logger("Invalid CX_MPICHECK_MPIAPI_TIMEOUT: %v", err)
+			os.Exit(100)
+		}
+		cfg.MPIAPITimeout = d
 	}
 	if printRisksEnv != "" {
 		if v, err := parseBool(printRisksEnv); err == nil {
@@ -194,6 +203,7 @@ func main() {
 	fakeLockfileOutFlag := &stringFlag{value: cfg.FakeLockfileOut}
 	fakeLockfileCleanupFlag := &boolFlag{value: cfg.DeleteFakeLockfiles}
 	resolveFlag := &stringFlag{value: string(cfg.ResolveMode)}
+	mpiapiTimeoutFlag := &stringFlag{value: cfg.MPIAPITimeout.String()}
 	batchSizeFlag := &intFlag{value: cfg.BatchSize}
 	verboseFlag := &boolFlag{value: verbose}
 	versionFlag := &boolFlag{value: false}
@@ -215,6 +225,7 @@ func main() {
 	flag.Var(fakeLockfileOutFlag, "fake-lockfile-out", "Output directory for generated fake lockfiles")
 	fakeCleanupName := registerBoolFlag(fakeLockfileCleanupFlag, "fake-lockfile-cleanup", cfg.DeleteFakeLockfiles, "Delete generated fake lockfiles on exit")
 	flag.Var(resolveFlag, "resolve", "Resolve mode for fake lockfiles: never|demand|smart|always")
+	flag.Var(mpiapiTimeoutFlag, "mpiapi-timeout", "Per-request timeout for MPIAPI calls as a Go duration (e.g. 24s, 1m30s). 0 disables.")
 	flag.Var(batchSizeFlag, "batch-size", "Number of packages per MPIAPI request (1-1000)")
 	verboseName := registerBoolFlag(verboseFlag, "verbose", verbose, "Enable verbose logging")
 	registerBoolFlag(versionFlag, "version", false, "Print version and exit")
@@ -303,6 +314,15 @@ func main() {
 	if resolveFlag.set {
 		noteOverride(logger, "CX_MPICHECK_RESOLVE", "--resolve")
 		cfg.ResolveMode = mpicheck.ResolveMode(strings.ToLower(resolveFlag.value))
+	}
+	if mpiapiTimeoutFlag.set {
+		noteOverride(logger, "CX_MPICHECK_MPIAPI_TIMEOUT", "--mpiapi-timeout")
+		d, err := time.ParseDuration(mpiapiTimeoutFlag.value)
+		if err != nil {
+			logger("Invalid --mpiapi-timeout: %v", err)
+			os.Exit(100)
+		}
+		cfg.MPIAPITimeout = d
 	}
 	if batchSizeFlag.set {
 		noteOverride(logger, "CX_MPICHECK_BATCH_SIZE", "--batch-size")
@@ -514,6 +534,9 @@ func printConfigDiffs(logf func(string, ...interface{}), cfg mpicheck.Config, ex
 	if cfg.ResolveMode != defaults.ResolveMode {
 		diffs = append(diffs, diff{name: "resolve", value: string(cfg.ResolveMode)})
 	}
+	if cfg.MPIAPITimeout != defaults.MPIAPITimeout {
+		diffs = append(diffs, diff{name: "mpiapi-timeout", value: cfg.MPIAPITimeout.String()})
+	}
 	if cfg.OutPackages != defaults.OutPackages {
 		diffs = append(diffs, diff{name: "out-packages", value: cfg.OutPackages})
 	}
@@ -661,7 +684,7 @@ func backupFile(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(backup, data, 0o644)
+	return os.WriteFile(backup, data, mpicheck.OwnerFileMode)
 }
 
 func writeJSONFile(path string, value interface{}) error {
@@ -669,5 +692,5 @@ func writeJSONFile(path string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, 0o644)
+	return os.WriteFile(path, payload, mpicheck.OwnerFileMode)
 }

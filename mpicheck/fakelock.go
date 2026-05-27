@@ -86,6 +86,69 @@ func GenerateFakeLockfiles(ctx context.Context, cfg Config, logf LogFunc) ([]str
 	return generated, ignored, nil
 }
 
+// backupExistingLockfile moves an existing lockfile out of the way so
+// the package manager can produce a fresh one in its place. Returns:
+//   - backupPath: where the original was moved (empty if no backup
+//     was needed, either because the original doesn't exist or
+//     because lockPath and outPath are the same path)
+//   - restore: a best-effort callback that moves the backup back to
+//     lockPath. Safe to call multiple times; subsequent calls after
+//     the first successful rename are no-ops (the source no longer
+//     exists).
+//   - err: any error from the initial rename.
+//
+// Callers use this with a defer guarded by a "committed" flag, so the
+// backup is restored on any error path and explicitly restored once
+// the new lockfile is safely in place:
+//
+//	backupPath, restore, err := backupExistingLockfile(lockPath, outPath)
+//	if err != nil { return "", err }
+//	committed := false
+//	defer func() { if !committed { restore() } }()
+//	// ... generator work ...
+//	if backupPath != "" {
+//	    if err := os.Rename(backupPath, lockPath); err != nil { return "", err }
+//	}
+//	committed = true
+//
+// os.Rename preserves the original file's mode and inode within a
+// single filesystem, so the backup does not introduce any
+// confidentiality change relative to what the user had on disk.
+func backupExistingLockfile(lockPath, outPath string) (string, func(), error) {
+	noop := func() {}
+	if !fileExists(lockPath) || filepath.Clean(lockPath) == filepath.Clean(outPath) {
+		return "", noop, nil
+	}
+	backupPath := lockPath + ".cxmpicheck." + fmt.Sprintf("%d", time.Now().Unix()) + ".bak"
+	if err := os.Rename(lockPath, backupPath); err != nil {
+		return "", noop, err
+	}
+	return backupPath, func() {
+		_ = os.Rename(backupPath, lockPath)
+	}, nil
+}
+
+// validateGeneratedLockfile checks that the package manager actually
+// produced a usable lockfile at path: the file must exist, be a
+// regular file, and be non-empty. A 0-byte file usually indicates the
+// manager wrote a partial result before failing.
+func validateGeneratedLockfile(path, manager string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s did not produce a lockfile at %s", manager, path)
+		}
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s produced a directory instead of a file at %s", manager, path)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("%s produced an empty lockfile at %s", manager, path)
+	}
+	return nil
+}
+
 func ensureFileExists(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -100,13 +163,17 @@ func ensureFileExists(path string) error {
 func generateNpmLockfile(ctx context.Context, defPath, outPath string, logf LogFunc) (string, error) {
 	dir := filepath.Dir(defPath)
 	lockPath := filepath.Join(dir, "package-lock.json")
-	backupPath := ""
-	if fileExists(lockPath) && filepath.Clean(lockPath) != filepath.Clean(outPath) {
-		backupPath = lockPath + ".cxmpicheck." + fmt.Sprintf("%d", time.Now().Unix()) + ".bak"
-		if err := os.Rename(lockPath, backupPath); err != nil {
-			return "", err
-		}
+
+	backupPath, restore, err := backupExistingLockfile(lockPath, outPath)
+	if err != nil {
+		return "", err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			restore()
+		}
+	}()
 
 	logf("Generating npm lockfile for %s", defPath)
 	if err := requireTool("npm"); err != nil {
@@ -116,21 +183,15 @@ func generateNpmLockfile(ctx context.Context, defPath, outPath string, logf LogF
 	if err := runCommand(ctx, dir, logf, "npm", baseArgs...); err != nil {
 		logf("npm lockfile generation failed, retrying with --legacy-peer-deps")
 		if retryErr := runCommand(ctx, dir, logf, "npm", append(baseArgs, "--legacy-peer-deps")...); retryErr != nil {
-			if backupPath != "" {
-				_ = os.Rename(backupPath, lockPath)
-			}
 			return "", retryErr
 		}
 	}
 
-	if !fileExists(lockPath) {
-		if backupPath != "" {
-			_ = os.Rename(backupPath, lockPath)
-		}
-		return "", fmt.Errorf("npm did not produce package-lock.json")
+	if err := validateGeneratedLockfile(lockPath, "npm"); err != nil {
+		return "", err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -145,6 +206,10 @@ func generateNpmLockfile(ctx context.Context, defPath, outPath string, logf LogF
 		}
 	}
 
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
+	}
+	committed = true
 	return outPath, nil
 }
 
@@ -263,33 +328,31 @@ func lockfilesToIgnore(manager string, defPath string) []string {
 func generatePnpmLockfile(ctx context.Context, defPath, outPath string, logf LogFunc) (string, error) {
 	dir := filepath.Dir(defPath)
 	lockPath := filepath.Join(dir, "pnpm-lock.yaml")
-	backupPath := ""
-	if fileExists(lockPath) && filepath.Clean(lockPath) != filepath.Clean(outPath) {
-		backupPath = lockPath + ".cxmpicheck." + fmt.Sprintf("%d", time.Now().Unix()) + ".bak"
-		if err := os.Rename(lockPath, backupPath); err != nil {
-			return "", err
-		}
+
+	backupPath, restore, err := backupExistingLockfile(lockPath, outPath)
+	if err != nil {
+		return "", err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			restore()
+		}
+	}()
 
 	logf("Generating pnpm lockfile for %s", defPath)
 	if err := requireTool("pnpm"); err != nil {
 		return "", err
 	}
 	if err := runCommand(ctx, dir, logf, "pnpm", "install", "--lockfile-only", "--ignore-scripts", "--no-frozen-lockfile"); err != nil {
-		if backupPath != "" {
-			_ = os.Rename(backupPath, lockPath)
-		}
 		return "", err
 	}
 
-	if !fileExists(lockPath) {
-		if backupPath != "" {
-			_ = os.Rename(backupPath, lockPath)
-		}
-		return "", fmt.Errorf("pnpm did not produce pnpm-lock.yaml")
+	if err := validateGeneratedLockfile(lockPath, "pnpm"); err != nil {
+		return "", err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -303,39 +366,41 @@ func generatePnpmLockfile(ctx context.Context, defPath, outPath string, logf Log
 			return "", err
 		}
 	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
+	}
+	committed = true
 	return outPath, nil
 }
 
 func generatePipenvLockfile(ctx context.Context, defPath, outPath string, logf LogFunc) (string, error) {
 	dir := filepath.Dir(defPath)
 	lockPath := filepath.Join(dir, "Pipfile.lock")
-	backupPath := ""
-	if fileExists(lockPath) && filepath.Clean(lockPath) != filepath.Clean(outPath) {
-		backupPath = lockPath + ".cxmpicheck." + fmt.Sprintf("%d", time.Now().Unix()) + ".bak"
-		if err := os.Rename(lockPath, backupPath); err != nil {
-			return "", err
-		}
+
+	backupPath, restore, err := backupExistingLockfile(lockPath, outPath)
+	if err != nil {
+		return "", err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			restore()
+		}
+	}()
 
 	logf("Generating pipenv lockfile for %s", defPath)
 	if err := requireTool("pipenv"); err != nil {
 		return "", err
 	}
 	if err := runCommand(ctx, dir, logf, "pipenv", "lock"); err != nil {
-		if backupPath != "" {
-			_ = os.Rename(backupPath, lockPath)
-		}
 		return "", err
 	}
 
-	if !fileExists(lockPath) {
-		if backupPath != "" {
-			_ = os.Rename(backupPath, lockPath)
-		}
-		return "", fmt.Errorf("pipenv did not produce Pipfile.lock")
+	if err := validateGeneratedLockfile(lockPath, "pipenv"); err != nil {
+		return "", err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -349,39 +414,41 @@ func generatePipenvLockfile(ctx context.Context, defPath, outPath string, logf L
 			return "", err
 		}
 	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
+	}
+	committed = true
 	return outPath, nil
 }
 
 func generatePoetryLockfile(ctx context.Context, defPath, outPath string, logf LogFunc) (string, error) {
 	dir := filepath.Dir(defPath)
 	lockPath := filepath.Join(dir, "poetry.lock")
-	backupPath := ""
-	if fileExists(lockPath) && filepath.Clean(lockPath) != filepath.Clean(outPath) {
-		backupPath = lockPath + ".cxmpicheck." + fmt.Sprintf("%d", time.Now().Unix()) + ".bak"
-		if err := os.Rename(lockPath, backupPath); err != nil {
-			return "", err
-		}
+
+	backupPath, restore, err := backupExistingLockfile(lockPath, outPath)
+	if err != nil {
+		return "", err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			restore()
+		}
+	}()
 
 	logf("Generating poetry lockfile for %s", defPath)
 	if err := requireTool("poetry"); err != nil {
 		return "", err
 	}
 	if err := runCommand(ctx, dir, logf, "poetry", "lock", "--no-update"); err != nil {
-		if backupPath != "" {
-			_ = os.Rename(backupPath, lockPath)
-		}
 		return "", err
 	}
 
-	if !fileExists(lockPath) {
-		if backupPath != "" {
-			_ = os.Rename(backupPath, lockPath)
-		}
-		return "", fmt.Errorf("poetry did not produce poetry.lock")
+	if err := validateGeneratedLockfile(lockPath, "poetry"); err != nil {
+		return "", err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -395,6 +462,10 @@ func generatePoetryLockfile(ctx context.Context, defPath, outPath string, logf L
 			return "", err
 		}
 	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
+	}
+	committed = true
 	return outPath, nil
 }
 
@@ -420,6 +491,9 @@ func generatePipLockfile(ctx context.Context, defPath, outPath string, logf LogF
 	if !fileExists(outPath) {
 		return "", fmt.Errorf("pip-compile did not produce %s", outPath)
 	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
+	}
 	return outPath, nil
 }
 
@@ -432,14 +506,14 @@ func generateGoLockfile(ctx context.Context, defPath, outPath string, logf LogFu
 	if err := runCommand(ctx, dir, logf, "go", "mod", "tidy"); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	data, err := os.ReadFile(defPath)
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	if err := os.WriteFile(outPath, data, OwnerFileMode); err != nil {
 		return "", err
 	}
 	return outPath, nil

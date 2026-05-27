@@ -31,6 +31,7 @@ coverage.out
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 
 # Logs
 *.log
@@ -43,5 +44,5 @@ Thumbs.db
 # Local agent notes
 AGENTS.md
 
-
-AGENTS.md
+# Local security review notes (do not commit)
+SECURITY-REVIEW.md

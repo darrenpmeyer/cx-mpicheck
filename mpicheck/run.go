@@ -11,12 +11,50 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
 
 const mpiAPIURL = "https://api.scs.checkmarx.com/v2/packages"
+
+// Hard byte-count caps for reads cx-mpicheck performs against
+// potentially-attacker-controlled inputs. Exposed as variables (not
+// constants) so tests can override them with small values without
+// having to materialize 500 MB of data on disk or over the wire.
+var (
+	// MaxLockfileBytes caps a single lockfile read. A file larger
+	// than this returns errCodeIO and the run halts before parsing.
+	MaxLockfileBytes int64 = 500 * 1024 * 1024
+
+	// MaxResponseBytes caps a single MPIAPI HTTP response body. A
+	// response larger than this returns errCodeNetwork.
+	MaxResponseBytes int64 = 500 * 1024 * 1024
+)
+
+// readLockfile reads path with a hard size cap. Returns a typed
+// *Error{Code: errCodeIO} when the file exceeds MaxLockfileBytes;
+// other read errors (open, IO) propagate as plain errors and are
+// classified by the caller.
+func readLockfile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, MaxLockfileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxLockfileBytes {
+		return nil, &Error{
+			Code: errCodeIO,
+			Err:  fmt.Errorf("lockfile %s exceeds maximum size of %d bytes", path, MaxLockfileBytes),
+		}
+	}
+	return data, nil
+}
 
 const (
 	errCodeConfig  = 100
@@ -26,17 +64,52 @@ const (
 	errCodeNetwork = 140
 )
 
+// MaxAPIKeyLen caps the accepted MPIAPI key length. The key is a JWT;
+// real-world JWTs run a few hundred to a couple thousand characters, so
+// 2048 is a sane upper bound that catches binary blobs and accidental
+// file-contents-as-env without rejecting any realistic token.
+const MaxAPIKeyLen = 2048
+
+// apiKeyPattern matches a JWT: three non-empty URL-safe base64 segments
+// (A-Z, a-z, 0-9, '-', '_') joined by '.'. Padding ('=') is allowed but
+// rarely present in real JWTs; we accept 0-2 trailing '=' per segment
+// for robustness.
+var apiKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+=*\.[A-Za-z0-9_-]+=*\.[A-Za-z0-9_-]+=*$`)
+
+// validateAPIKey enforces length and JWT-shape constraints on the MPIAPI
+// key. The key value is never echoed in the returned error; only its
+// length is mentioned when that is the failure mode. Returns the
+// whitespace-trimmed key for use in the Authorization header.
+func validateAPIKey(key string) (string, error) {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return "", errors.New("CHECKMARX_MPIAPI_KEY is required")
+	}
+	if len(trimmed) > MaxAPIKeyLen {
+		return "", fmt.Errorf("CHECKMARX_MPIAPI_KEY length %d exceeds maximum of %d characters", len(trimmed), MaxAPIKeyLen)
+	}
+	if !apiKeyPattern.MatchString(trimmed) {
+		return "", errors.New("CHECKMARX_MPIAPI_KEY is not a well-formed JWT (expected three URL-safe base64 segments joined by '.')")
+	}
+	return trimmed, nil
+}
+
 // Run executes the full scan + MPIAPI flow.
 func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 	result := RunResult{StartedAt: time.Now()}
 	if cfg.RootDir == "" {
 		return result, &Error{Code: errCodeConfig, Err: errors.New("root directory is required")}
 	}
-	if cfg.APIKey == "" {
-		return result, &Error{Code: errCodeConfig, Err: errors.New("CHECKMARX_MPIAPI_KEY is required")}
+	trimmedKey, err := validateAPIKey(cfg.APIKey)
+	if err != nil {
+		return result, &Error{Code: errCodeConfig, Err: err}
 	}
+	cfg.APIKey = trimmedKey
 	if cfg.BatchSize <= 0 || cfg.BatchSize > 1000 {
 		return result, &Error{Code: errCodeConfig, Err: fmt.Errorf("batch size must be 1-1000")}
+	}
+	if cfg.MPIAPITimeout < 0 {
+		return result, &Error{Code: errCodeConfig, Err: fmt.Errorf("mpiapi timeout must be non-negative (got %s)", cfg.MPIAPITimeout)}
 	}
 	if cfg.ResolveMode == "" {
 		cfg.ResolveMode = ResolveDemand
@@ -52,6 +125,11 @@ func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 	if err != nil {
 		return result, &Error{Code: errCodeConfig, Err: err}
 	}
+	// Canonicalize root so relative-path computations against lockfile
+	// paths (which discovery also canonicalizes) line up. On macOS this
+	// matters even without explicit symlinks because /var is a symlink
+	// to /private/var.
+	rootAbs = resolveSymlinks(rootAbs)
 
 	if cfg.ResolveMode == ResolveNever && len(cfg.FakeLockfiles) > 0 {
 		logf("Resolve mode 'never' set; ignoring fake lockfile generation inputs")
@@ -113,6 +191,12 @@ func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 
 	occurrences, err := parseLockfiles(logf, lockfiles)
 	if err != nil {
+		// readLockfile may return a typed *Error (e.g. errCodeIO for
+		// the size cap); propagate its Code directly rather than
+		// re-labeling it as a parse error.
+		if typed, ok := err.(*Error); ok {
+			return result, typed
+		}
 		return result, &Error{Code: errCodeParse, Err: err}
 	}
 
@@ -142,7 +226,7 @@ func Run(ctx context.Context, cfg Config, logf LogFunc) (RunResult, error) {
 
 	client := cfg.HTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: cfg.MPIAPITimeout}
 	}
 	allResults, err := queryMPIAPI(ctx, client, cfg.APIKey, queries, logf)
 	if err != nil {
@@ -190,7 +274,7 @@ func parseLockfiles(logf LogFunc, lockfiles []LockfileRef) ([]PackageOccurrence,
 		if !ok {
 			return nil, fmt.Errorf("missing handler for lockfile kind %s", lf.Kind)
 		}
-		data, err := os.ReadFile(lf.Path)
+		data, err := readLockfile(lf.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -284,13 +368,19 @@ func queryMPIAPI(ctx context.Context, client *http.Client, apiKey string, batche
 		if err != nil {
 			return nil, &Error{Code: errCodeNetwork, Err: err}
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 		resp.Body.Close()
 		if err != nil {
 			return nil, &Error{Code: errCodeNetwork, Err: err}
 		}
+		if int64(len(body)) > MaxResponseBytes {
+			return nil, &Error{
+				Code: errCodeNetwork,
+				Err:  fmt.Errorf("MPIAPI response exceeds maximum size of %d bytes", MaxResponseBytes),
+			}
+		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, &Error{Code: errCodeNetwork, Err: fmt.Errorf("MPIAPI returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))}
+			return nil, &Error{Code: errCodeNetwork, Err: fmt.Errorf("MPIAPI returned %d: %s", resp.StatusCode, Redact(strings.TrimSpace(string(body)), apiKey))}
 		}
 		var batchResults []map[string]interface{}
 		if err := json.Unmarshal(body, &batchResults); err != nil {
@@ -347,10 +437,10 @@ func writeJSON(path string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), OwnerDirMode); err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, 0o644)
+	return os.WriteFile(path, payload, OwnerFileMode)
 }
 
 func contains(list []string, value string) bool {

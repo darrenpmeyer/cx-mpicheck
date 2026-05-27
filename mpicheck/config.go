@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 package mpicheck
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+)
 
 // IncludeMode controls how explicit lockfile paths are used.
 type IncludeMode string
@@ -29,6 +32,11 @@ type Config struct {
 	BatchSize           int
 	APIKey              string
 	HTTPClient          *http.Client
+	// MPIAPITimeout caps a single MPIAPI HTTP request. 0 disables the
+	// timeout (not recommended). Only applied when HTTPClient is nil —
+	// callers that supply their own client are expected to set its
+	// Timeout themselves.
+	MPIAPITimeout time.Duration
 }
 
 // DefaultConfig returns a Config with default values.
@@ -39,9 +47,10 @@ func DefaultConfig() Config {
 		OutPackages:  "cx.packages-master.json",
 		OutResults:   "cx.mpiapi-results.json",
 		OutRisks:     "cx.mpiapi-risks.json",
-		RiskExitCode: 22,
-		BatchSize:    1000,
-		ResolveMode:  ResolveDemand,
+		RiskExitCode:  22,
+		BatchSize:     1000,
+		ResolveMode:   ResolveDemand,
+		MPIAPITimeout: 24 * time.Second,
 	}
 }
 
