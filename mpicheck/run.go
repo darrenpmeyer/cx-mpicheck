@@ -383,10 +383,10 @@ func writeJSON(path string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), OwnerDirMode); err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, 0o644)
+	return os.WriteFile(path, payload, OwnerFileMode)
 }
 
 func contains(list []string, value string) bool {

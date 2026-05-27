@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +159,57 @@ func TestRunValidatesAPIKey(t *testing.T) {
 	}
 	if typed.Code != errCodeConfig {
 		t.Fatalf("expected errCodeConfig (%d), got %d", errCodeConfig, typed.Code)
+	}
+}
+
+func TestRunOutputFilesAreOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not enforced on Windows in the way 0o600 implies; this assertion is POSIX-only")
+	}
+
+	root := t.TempDir()
+	lock := filepath.Join(root, "package-lock.json")
+	if err := os.WriteFile(lock, []byte(`{"packages":{"node_modules/lodash":{"version":"4.17.21"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	target, _ := url.Parse(srv.URL)
+
+	cfg := DefaultConfig()
+	cfg.RootDir = root
+	cfg.APIKey = "aaaa.bbbb.cccc"
+	cfg.OutPackages = filepath.Join(root, "out", "packages.json")
+	cfg.OutResults = filepath.Join(root, "out", "results.json")
+	cfg.OutRisks = filepath.Join(root, "out", "risks.json")
+	cfg.BatchSize = 1000
+	cfg.HTTPClient = &http.Client{Transport: &rewriteTransport{base: http.DefaultTransport, target: target}}
+
+	if _, err := Run(context.Background(), cfg, func(string, ...interface{}) {}); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	for _, p := range []string{cfg.OutPackages, cfg.OutResults, cfg.OutRisks} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if got := info.Mode().Perm(); got != OwnerFileMode {
+			t.Errorf("%s: mode %o, want %o", p, got, OwnerFileMode)
+		}
+	}
+
+	// Parent dir created by writeJSON should also be owner-only.
+	dirInfo, err := os.Stat(filepath.Join(root, "out"))
+	if err != nil {
+		t.Fatalf("stat out dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != OwnerDirMode {
+		t.Errorf("out dir: mode %o, want %o", got, OwnerDirMode)
 	}
 }
 

@@ -130,7 +130,7 @@ func generateNpmLockfile(ctx context.Context, defPath, outPath string, logf LogF
 		return "", fmt.Errorf("npm did not produce package-lock.json")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -145,6 +145,9 @@ func generateNpmLockfile(ctx context.Context, defPath, outPath string, logf LogF
 		}
 	}
 
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
+	}
 	return outPath, nil
 }
 
@@ -289,7 +292,7 @@ func generatePnpmLockfile(ctx context.Context, defPath, outPath string, logf Log
 		return "", fmt.Errorf("pnpm did not produce pnpm-lock.yaml")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -302,6 +305,9 @@ func generatePnpmLockfile(ctx context.Context, defPath, outPath string, logf Log
 		if err := os.Rename(backupPath, lockPath); err != nil {
 			return "", err
 		}
+	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
 	}
 	return outPath, nil
 }
@@ -335,7 +341,7 @@ func generatePipenvLockfile(ctx context.Context, defPath, outPath string, logf L
 		return "", fmt.Errorf("pipenv did not produce Pipfile.lock")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -348,6 +354,9 @@ func generatePipenvLockfile(ctx context.Context, defPath, outPath string, logf L
 		if err := os.Rename(backupPath, lockPath); err != nil {
 			return "", err
 		}
+	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
 	}
 	return outPath, nil
 }
@@ -381,7 +390,7 @@ func generatePoetryLockfile(ctx context.Context, defPath, outPath string, logf L
 		return "", fmt.Errorf("poetry did not produce poetry.lock")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	if filepath.Clean(lockPath) != filepath.Clean(outPath) {
@@ -394,6 +403,9 @@ func generatePoetryLockfile(ctx context.Context, defPath, outPath string, logf L
 		if err := os.Rename(backupPath, lockPath); err != nil {
 			return "", err
 		}
+	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
 	}
 	return outPath, nil
 }
@@ -420,6 +432,9 @@ func generatePipLockfile(ctx context.Context, defPath, outPath string, logf LogF
 	if !fileExists(outPath) {
 		return "", fmt.Errorf("pip-compile did not produce %s", outPath)
 	}
+	if err := os.Chmod(outPath, OwnerFileMode); err != nil {
+		return "", err
+	}
 	return outPath, nil
 }
 
@@ -432,14 +447,14 @@ func generateGoLockfile(ctx context.Context, defPath, outPath string, logf LogFu
 	if err := runCommand(ctx, dir, logf, "go", "mod", "tidy"); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), OwnerDirMode); err != nil {
 		return "", err
 	}
 	data, err := os.ReadFile(defPath)
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	if err := os.WriteFile(outPath, data, OwnerFileMode); err != nil {
 		return "", err
 	}
 	return outPath, nil

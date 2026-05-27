@@ -684,7 +684,7 @@ func backupFile(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(backup, data, 0o644)
+	return os.WriteFile(backup, data, mpicheck.OwnerFileMode)
 }
 
 func writeJSONFile(path string, value interface{}) error {
@@ -692,5 +692,5 @@ func writeJSONFile(path string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, 0o644)
+	return os.WriteFile(path, payload, mpicheck.OwnerFileMode)
 }
