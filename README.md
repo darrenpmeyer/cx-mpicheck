@@ -1,5 +1,7 @@
 # cx-mpicheck
 
+**NOTE**: this project is maintained by Darren Meyer; while Darren is employed by Checkmarx, this repository is not owned or officially supported by Checkmarx. See [LICENSE](LICENSE) for information.
+
 `cx-mpicheck` is both:
 
 - A Go library (`mpicheck`) for discovering lockfiles, building a package inventory, and querying Checkmarx MPIAPI for risks.
@@ -31,7 +33,7 @@ Version
 
 License
 
-This project is licensed under the GNU AGPLv3. Using this tool (even with modifications) as part of your application’s build process does not change or impose the AGPL on your application’s own licensing terms.
+This project is licensed under the GNU AGPLv3. Using this tool (even with modifications) as part of your application’s build process does not change or impose the AGPL on your application’s own licensing terms. Note that the license disclaims warranty.
 
 Quick start (library)
 

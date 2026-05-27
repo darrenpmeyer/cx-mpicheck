@@ -120,7 +120,7 @@ Flags and environment variables
 
 - `--force-rescan` / `CX_MPICHECK_FORCE_RESCAN`
   - Ignore existing risk report and rescan lockfiles (`true`/`false`).
-  - Default: `false`
+  - Default: `false`: avoids re-scanning lockfiles that have already been scanned
 
 - `--batch-size` / `CX_MPICHECK_BATCH_SIZE`
   - MPIAPI batch size (1-1000).
